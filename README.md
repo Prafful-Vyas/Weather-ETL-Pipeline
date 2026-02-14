@@ -1,7 +1,3 @@
-Here is a **clean, properly formatted, ready-to-paste `README.md`** — no formatting issues:
-
----
-
 # 🌦️ Weather Data Lakehouse (DuckDB + uv)
 
 A production-style **Medallion Architecture** data pipeline built using:

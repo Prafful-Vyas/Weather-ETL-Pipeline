@@ -4,7 +4,7 @@ import pandas as pd
 import logging
 import os
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -112,7 +112,7 @@ def transform(record):
         "winddirection": float(current["winddirection"]),
         "weathercode": int(current["weathercode"]),
         "observation_time": current["time"],
-        "ingestion_time": datetime.utcnow(),
+        "ingestion_time": datetime.now(timezone.utc),
     }
 
 
@@ -121,7 +121,7 @@ def transform(record):
 # ==========================================================
 
 def write_city_partition(df):
-    date_part = datetime.utcnow().strftime("%Y-%m-%d")
+    date_part = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     for city in df["city"].unique():
         city_df = df[df["city"] == city]

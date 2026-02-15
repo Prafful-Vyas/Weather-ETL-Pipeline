@@ -1,25 +1,41 @@
-# 🌦️ Weather Data Lakehouse (DuckDB + uv)
+# 🌦️ Weather ETL Pipeline
 
-A production-style **Medallion Architecture** data pipeline built using:
+A production-style Weather ETL pipeline built using:
 
-* DuckDB (in-process analytical database)
-* Hive-style partitioned Parquet
-* `uv` as the package manager
-* Bronze → Silver → Gold layered modeling
+* **DuckDB** (in-process analytical database)
+* **Hive-style partitioned Parquet**
+* Incremental processing with partition tracking
+* Modular architecture (`bronze.py`, `silver.py`, `gold.py`, `metadata.py`)
+* **uv** as the package manager
 
-This project demonstrates modern data engineering practices using a lightweight, local-first lakehouse design.
+This project demonstrates modern data engineering best practices using a lightweight local lakehouse architecture.
 
 ---
 
 # 🏗 Architecture
 
-The pipeline follows a Medallion (Bronze / Silver / Gold) architecture pattern:
+The pipeline follows a **Medallion Architecture** pattern:
 
 ```
-data/   → Bronze (raw weather data)
-silver/ → Cleaned & standardized data
-gold/   → Aggregated & analytics-ready datasets
+Raw Data  →  Bronze  →  Silver  →  Gold
 ```
+
+### Layer Responsibilities
+
+* **Bronze** → Raw ingestion & partition detection
+* **Silver** → Data cleaning & validation
+* **Gold** → Aggregated analytics
+
+Each layer:
+
+1. Detects available partitions
+2. Checks already processed partitions
+3. Computes the difference
+4. Processes only new partitions
+5. Writes partitioned Parquet output
+6. Updates `pipeline_metadata`
+
+This ensures fast, incremental, idempotent execution.
 
 ---
 
@@ -27,39 +43,77 @@ gold/   → Aggregated & analytics-ready datasets
 
 ```
 .
-├── data/              # Bronze layer (raw weather data)
+├── data/                  # Bronze (raw weather parquet partitions)
 │   └── city=<city>/date=<YYYY-MM-DD>/weather.parquet
-│
-├── silver/            # Cleaned & transformed data
-│   └── city=<city>/date=<YYYY-MM-DD>/data_0.parquet
-│
-├── gold/              # Aggregated analytics layer
-│   └── city=<city>/date=<YYYY-MM-DD>/data_0.parquet
-│
-├── main.py            # Pipeline entrypoint
+├── silver/                # Silver (cleaned parquet)
+├── gold/                  # Gold (aggregated parquet)
+├── bronze.py              # Bronze layer logic
+├── silver.py              # Silver layer logic
+├── gold.py                # Gold layer logic
+├── metadata.py            # Metadata table setup
+├── main.py                # Pipeline orchestrator
 ├── sql-data-cleaning.ipynb
-├── requirements.txt
+├── pyproject.toml         # Project config (uv)
+└── uv.lock
 ```
 
 ---
 
-# 🗂 Partitioning Strategy
+# 🧱 Partitioning Strategy
 
-The dataset uses **Hive-style partitioning**:
+This project uses **Hive-style partitioning**:
 
 ```
-city=Delhi/date=2026-02-13/weather.parquet
+city=London/date=2026-02-13/weather.parquet
 ```
 
-### Benefits
+Benefits:
 
-* Partition pruning
-* Faster queries
+* Automatic partition column inference
+* Partition pruning during queries
 * Reduced I/O
-* Scalable storage layout
-* Lakehouse-compatible design
+* Lakehouse-compatible structure
+* Scalable data layout
 
-DuckDB automatically detects partition columns (`city`, `date`) from folder names.
+DuckDB automatically reads `city` and `date` from folder paths when:
+
+```sql
+read_parquet('silver/**/*.parquet', hive_partitioning = true)
+```
+
+---
+
+# 📈 Incremental Processing
+
+The pipeline avoids full rebuilds.
+
+Instead, it processes **only new partitions**.
+
+Metadata tracking is handled inside DuckDB:
+
+```sql
+CREATE TABLE IF NOT EXISTS pipeline_metadata (
+    layer TEXT,
+    city TEXT,
+    date DATE,
+    processed_at TIMESTAMP,
+    PRIMARY KEY (layer, city, date)
+);
+```
+
+### Workflow Example
+
+* New partition arrives in `data/`
+* Bronze processes it
+* Silver processes only new Bronze partitions
+* Gold processes only new Silver partitions
+* Metadata table updates automatically
+
+This makes the pipeline:
+
+* Idempotent
+* Efficient
+* Production-friendly
 
 ---
 
@@ -67,26 +121,26 @@ DuckDB automatically detects partition columns (`city`, `date`) from folder name
 
 This project uses **uv** instead of pip.
 
-## Install dependencies
+### Install dependencies
 
 ```bash
 uv sync
 ```
 
-If starting from scratch:
+Or create a new environment:
 
 ```bash
 uv venv
-uv pip install duckdb pandas pyarrow jupyter
+uv pip install duckdb pandas pyarrow
 ```
 
-Run the pipeline:
+### Run the pipeline
 
 ```bash
 uv run python main.py
 ```
 
-Run the notebook:
+### Open Jupyter Notebook
 
 ```bash
 uv run jupyter notebook
@@ -94,9 +148,61 @@ uv run jupyter notebook
 
 ---
 
-# 🚀 Querying Partitioned Data with DuckDB
+# 🚀 Pipeline Orchestration
 
-## Read Bronze Layer
+`main.py` coordinates execution:
+
+```python
+import duckdb
+from metadata import initialize_metadata
+import bronze
+import silver
+import gold
+
+def main():
+    con = duckdb.connect("pipeline.duckdb")
+    initialize_metadata(con)
+    bronze.run(con)
+    silver.run(con)
+    gold.run(con)
+
+if __name__ == "__main__":
+    main()
+```
+
+Each layer runs incrementally by default.
+
+---
+
+# 🥈 Silver Layer
+
+* Cleans null and invalid values
+* Normalizes column types
+* Standardizes schema
+* Writes partitioned Parquet
+* Updates metadata
+
+---
+
+# 🥇 Gold Layer
+
+Aggregates data at the `city + date` level.
+
+Example metrics:
+
+* Average temperature
+* Minimum temperature
+* Maximum temperature
+* Average humidity
+* Total record count
+
+Outputs partitioned Parquet and updates metadata.
+
+---
+
+# 🧠 Querying with DuckDB
+
+Query Gold layer directly:
 
 ```python
 import duckdb
@@ -105,115 +211,47 @@ con = duckdb.connect()
 
 df = con.execute("""
     SELECT *
-    FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
+    FROM read_parquet('gold/**/*.parquet', hive_partitioning=true)
+    WHERE city = 'London'
+      AND date = '2026-02-13';
 """).df()
+
+print(df)
 ```
 
-DuckDB automatically extracts:
-
-* `city`
-* `date`
+DuckDB automatically applies partition pruning for fast queries.
 
 ---
 
-## Filter with Partition Pruning
+# 🧠 What This Project Demonstrates
 
-```sql
-SELECT *
-FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
-WHERE city = 'Delhi'
-  AND date = '2026-02-13';
-```
-
-Only the relevant partition is scanned.
-
----
-
-# 🥈 Silver Layer (Cleaning Example)
-
-```sql
-CREATE OR REPLACE TABLE silver_weather AS
-SELECT
-    city,
-    CAST(date AS DATE) AS date,
-    temperature,
-    humidity,
-    wind_speed
-FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
-WHERE temperature IS NOT NULL;
-```
-
-Export as partitioned Parquet:
-
-```sql
-COPY silver_weather
-TO 'silver'
-(FORMAT PARQUET, PARTITION_BY (city, date));
-```
-
----
-
-# 🥇 Gold Layer (Aggregation Example)
-
-```sql
-CREATE OR REPLACE TABLE gold_daily_summary AS
-SELECT
-    city,
-    date,
-    AVG(temperature) AS avg_temp,
-    MAX(temperature) AS max_temp,
-    MIN(temperature) AS min_temp,
-    AVG(humidity) AS avg_humidity
-FROM read_parquet('silver/**/*.parquet', hive_partitioning=true)
-GROUP BY city, date;
-```
-
-Export:
-
-```sql
-COPY gold_daily_summary
-TO 'gold'
-(FORMAT PARQUET, PARTITION_BY (city, date));
-```
-
----
-
-# ⚡ Why DuckDB?
-
-* Vectorized execution engine
-* Columnar processing
-* In-process (no server required)
-* Direct Parquet querying
-* Automatic partition pruning
-* Ideal for local analytics & pipelines
-
----
-
-# 🎯 What This Project Demonstrates
-
-* Modern lakehouse architecture
+* Medallion architecture (Bronze → Silver → Gold)
+* Incremental ETL design
+* Metadata-driven processing
 * Hive-style partitioning
-* SQL-first data transformations
-* Bronze → Silver → Gold modeling
-* Efficient analytical querying
-* Reproducible pipelines using `uv`
-* Production-style data engineering design
+* SQL-based data transformations
+* Modular pipeline structure
+* DuckDB analytics on Parquet
+* Lakehouse-style local data platform
 
 ---
 
 # 🔮 Future Improvements
 
-* Incremental loads
-* CLI interface
-* Logging & monitoring
-* Airflow orchestration
-* Docker support
+* CLI flags (`--full-refresh`)
+* Parallel partition processing
+* Logging module
+* Docker containerization
+* Cloud storage support (S3 / GCS / Azure)
+* Automated testing (pytest)
 * CI/CD pipeline
-* Cloud storage integration (S3/GCS/Azure)
+* Data quality validation layer
 
 ---
 
 # 📌 Summary
 
-This project implements a lightweight local lakehouse using DuckDB with a scalable partitioned layout and clean separation of data layers — mirroring production-grade data engineering workflows in a minimal, efficient setup.
+This project implements a scalable, partition-aware, incremental ETL pipeline using DuckDB and Parquet.
+
+It mirrors real-world data engineering workflows and serves as a strong foundation for production-ready analytics pipelines.
 

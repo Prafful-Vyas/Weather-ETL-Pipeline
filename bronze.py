@@ -1,6 +1,5 @@
 import duckdb
 import logging
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +44,32 @@ def validate_partition(con: duckdb.DuckDBPyConnection):
     """
     Basic data quality checks before writing Bronze.
     """
-    row_count = con.execute("SELECT COUNT(*) FROM tmp_bronze").fetchone()[0]
+
+    result = con.execute(
+        "SELECT COUNT(*) FROM tmp_bronze"
+    ).fetchone()
+
+    if result is None:
+        raise RuntimeError("Failed to fetch row count from tmp_bronze")
+
+    row_count = result[0]
 
     if row_count == 0:
         raise ValueError("Empty Bronze partition detected.")
 
-    null_check = con.execute("""
+    result = con.execute("""
         SELECT COUNT(*) FROM tmp_bronze
         WHERE temperature IS NULL
-    """).fetchone()[0]
+    """).fetchone()
+
+    if result is None:
+        raise RuntimeError("Failed to fetch NULL temperature count")
+
+    null_check = result[0]
 
     if null_check > 0:
         logger.warning("Null temperature values detected in Bronze layer.")
+
 
 
 # ---------------------------------------------------------------------

@@ -1,14 +1,14 @@
-import duckdb
 import logging
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+bronze_path = "data/**/*.parquet"
+
 
 def get_bronze_partitions(con):
-    return set(con.execute("""
+    return set(con.execute(f"""
         SELECT DISTINCT city, date
-        FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
+        FROM read_parquet('{bronze_path}', hive_partitioning=true)
     """).fetchall())
 
 
@@ -28,13 +28,15 @@ def process_partition(con, city, date):
         SELECT
             city,
             CAST(date AS DATE) AS date,
-            temperature,
-            humidity,
-            wind_speed
-        FROM read_parquet('data/**/*.parquet', hive_partitioning=true)
+            STRPTIME(time, '%Y-%m-%dT%H:%M') AS timestamp,
+            CAST(temperature_2m AS DOUBLE) AS temperature,
+            CAST(wind_speed_10m AS DOUBLE) AS wind_speed,
+            CAST(wind_direction_10m AS INTEGER) AS wind_direction,
+            CAST(weather_code AS INTEGER) AS weather_code
+        FROM read_parquet('{bronze_path}', hive_partitioning=true)
         WHERE city = '{city}'
           AND date = '{date}'
-          AND temperature IS NOT NULL;
+          AND temperature_2m IS NOT NULL
     """)
 
     row_count = con.execute(
@@ -44,12 +46,14 @@ def process_partition(con, city, date):
     if row_count == 0:
         raise ValueError(f"Empty Silver partition: {city} - {date}")
 
+    # Write partitioned silver data
     con.execute("""
         COPY tmp_silver
         TO 'silver'
-        (FORMAT PARQUET, PARTITION_BY (city, date));
+        (FORMAT PARQUET, PARTITION_BY (city, date), OVERWRITE TRUE);
     """)
 
+    # Update metadata
     con.execute("""
         INSERT OR REPLACE INTO pipeline_metadata
         VALUES ('silver', ?, ?, CURRENT_TIMESTAMP)

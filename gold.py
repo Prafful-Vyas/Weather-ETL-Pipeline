@@ -4,7 +4,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 SILVER_SOURCE_PATH = "silver/**/*.parquet"
-GOLD_OUTPUT_PATH = "gold"
 
 
 # ---------------------------------------------------------------------
@@ -14,19 +13,22 @@ GOLD_OUTPUT_PATH = "gold"
 def get_silver_partitions(con: duckdb.DuckDBPyConnection) -> set:
     """
     Detect available Silver partitions using hive partitioning.
+    Handles missing silver folder safely.
     """
-    partitions = con.execute(f"""
-        SELECT DISTINCT city, date
-        FROM read_parquet('{SILVER_SOURCE_PATH}', hive_partitioning=true)
-    """).fetchall()
+    try:
+        partitions = con.execute(f"""
+            SELECT DISTINCT city, date
+            FROM read_parquet('{SILVER_SOURCE_PATH}', hive_partitioning=true)
+        """).fetchall()
 
-    return set(partitions)
+        return set(partitions)
+
+    except duckdb.IOException:
+        logger.warning("No Silver data found.")
+        return set()
 
 
 def get_processed_partitions(con: duckdb.DuckDBPyConnection) -> set:
-    """
-    Fetch already processed Gold partitions from metadata.
-    """
     processed = con.execute("""
         SELECT city, date
         FROM pipeline_metadata
@@ -41,10 +43,9 @@ def get_processed_partitions(con: duckdb.DuckDBPyConnection) -> set:
 # ---------------------------------------------------------------------
 
 def validate_partition(con: duckdb.DuckDBPyConnection):
-    """
-    Validate aggregated Gold data before writing.
-    """
-    row_count = con.execute("SELECT COUNT(*) FROM tmp_gold").fetchone()[0]
+    row_count = con.execute(
+        "SELECT COUNT(*) FROM tmp_gold"
+    ).fetchone()[0]
 
     if row_count == 0:
         raise ValueError("Empty Gold partition detected.")
@@ -62,34 +63,30 @@ def validate_partition(con: duckdb.DuckDBPyConnection):
 # Processing Logic
 # ---------------------------------------------------------------------
 
-def process_partition(con: duckdb.DuckDBPyConnection, city: str, date: str):
-    """
-    Process a single Gold partition.
-    """
+def process_partition(con: duckdb.DuckDBPyConnection, city: str, date):
     logger.info(f"Processing Gold partition: {city} - {date}")
 
     con.execute(f"""
         CREATE OR REPLACE TABLE tmp_gold AS
         SELECT
             city,
-            date,
+            CAST(date AS DATE) AS date,
             AVG(temperature) AS avg_temp,
             MAX(temperature) AS max_temp,
             MIN(temperature) AS min_temp,
-            AVG(humidity) AS avg_humidity,
             COUNT(*) AS record_count
         FROM read_parquet('{SILVER_SOURCE_PATH}', hive_partitioning=true)
         WHERE city = '{city}'
           AND date = '{date}'
-        GROUP BY city, date;
+        GROUP BY city, date
     """)
 
     validate_partition(con)
 
     con.execute(f"""
         COPY tmp_gold
-        TO '{GOLD_OUTPUT_PATH}'
-        (FORMAT PARQUET, PARTITION_BY (city, date));
+        TO 'gold'
+        (FORMAT PARQUET, PARTITION_BY (city, date), OVERWRITE TRUE);
     """)
 
     con.execute("""
@@ -105,12 +102,13 @@ def process_partition(con: duckdb.DuckDBPyConnection, city: str, date: str):
 # ---------------------------------------------------------------------
 
 def run(con: duckdb.DuckDBPyConnection, full_refresh: bool = False):
-    """
-    Execute Gold incremental pipeline.
-    """
     logger.info("Starting Gold layer processing")
 
     available = get_silver_partitions(con)
+
+    if not available:
+        logger.info("No Silver partitions available. Skipping Gold.")
+        return
 
     if full_refresh:
         logger.info("Full refresh mode enabled")

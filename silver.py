@@ -1,74 +1,83 @@
 import logging
+from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
 bronze_path = "data/**/*.parquet"
 
 
-def get_bronze_partitions(con):
-    return set(con.execute(f"""
-        SELECT DISTINCT city, date
-        FROM read_parquet('{bronze_path}', hive_partitioning=true)
-    """).fetchall())
+def get_bronze_partitions(spark):
+    df = (
+        spark.read
+        .option("basePath", "data")
+        .parquet(bronze_path)
+        .select("city", "date")
+        .distinct()
+    )
+
+    return {(row.city, row.date) for row in df.collect()}
 
 
-def get_processed_partitions(con):
-    return set(con.execute("""
+def get_processed_partitions(spark):
+    df = spark.sql("""
         SELECT city, date
         FROM pipeline_metadata
         WHERE layer = 'silver'
-    """).fetchall())
-
-
-def process_partition(con, city, date):
-    logger.info(f"Processing Silver partition: {city} - {date}")
-
-    con.execute(f"""
-        CREATE OR REPLACE TABLE tmp_silver AS
-        SELECT
-            city,
-            CAST(date AS DATE) AS date,
-            STRPTIME(time, '%Y-%m-%dT%H:%M') AS timestamp,
-            CAST(temperature_2m AS DOUBLE) AS temperature,
-            CAST(wind_speed_10m AS DOUBLE) AS wind_speed,
-            CAST(wind_direction_10m AS INTEGER) AS wind_direction,
-            CAST(weather_code AS INTEGER) AS weather_code
-        FROM read_parquet('{bronze_path}', hive_partitioning=true)
-        WHERE city = '{city}'
-          AND date = '{date}'
-          AND temperature_2m IS NOT NULL
     """)
 
-    row_count = con.execute(
-        "SELECT COUNT(*) FROM tmp_silver"
-    ).fetchone()[0]
+    return {(row.city, row.date) for row in df.collect()}
+
+
+def process_partition(spark, city, date):
+
+    logger.info(f"Processing Silver partition: {city} - {date}")
+
+    bronze_df = (
+        spark.read
+        .option("basePath", "data")
+        .parquet(bronze_path)
+        .filter((F.col("city") == city) & (F.col("date") == date))
+        .filter(F.col("temperature_2m").isNotNull())
+    )
+
+    silver_df = bronze_df.select(
+        F.col("city"),
+        F.col("date").cast("date").alias("date"),
+        F.to_timestamp("time", "yyyy-MM-dd'T'HH:mm").alias("timestamp"),
+        F.col("temperature_2m").cast("double").alias("temperature"),
+        F.col("wind_speed_10m").cast("double").alias("wind_speed"),
+        F.col("wind_direction_10m").cast("int").alias("wind_direction"),
+        F.col("weather_code").cast("int").alias("weather_code")
+    )
+
+    row_count = silver_df.count()
 
     if row_count == 0:
         raise ValueError(f"Empty Silver partition: {city} - {date}")
 
-    # Write partitioned silver data
-    con.execute("""
-        COPY tmp_silver
-        TO 'silver'
-        (FORMAT PARQUET, PARTITION_BY (city, date), OVERWRITE TRUE);
-    """)
+    (
+        silver_df.write
+        .mode("overwrite")
+        .partitionBy("city", "date")
+        .parquet("silver")
+    )
 
-    # Update metadata
-    con.execute("""
-        INSERT OR REPLACE INTO pipeline_metadata
-        VALUES ('silver', ?, ?, CURRENT_TIMESTAMP)
-    """, [city, date])
+    spark.sql(f"""
+        INSERT INTO pipeline_metadata
+        VALUES ('silver', '{city}', '{date}', CURRENT_TIMESTAMP)
+    """)
 
     logger.info(f"Finished Silver partition: {city} - {date}")
 
 
-def run(con):
-    bronze = get_bronze_partitions(con)
-    processed = get_processed_partitions(con)
+def run(spark):
+
+    bronze = get_bronze_partitions(spark)
+    processed = get_processed_partitions(spark)
 
     to_process = bronze - processed
 
     logger.info(f"{len(to_process)} partitions to process")
 
     for city, date in to_process:
-        process_partition(con, city, date)
+        process_partition(spark, city, date)

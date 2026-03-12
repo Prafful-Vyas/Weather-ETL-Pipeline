@@ -1,10 +1,10 @@
-def initialize_metadata(con):
-    con.execute("""
+def initialize_metadata(spark):
+    spark.sql("""
         CREATE TABLE IF NOT EXISTS pipeline_metadata (
-            layer TEXT,
-            city TEXT,
+            layer STRING,
+            city STRING,
             date DATE,
-            processed_at TIMESTAMP,
-            PRIMARY KEY (layer, city, date)
-        );
+            processed_at TIMESTAMP
+        )
+        USING PARQUET
     """)

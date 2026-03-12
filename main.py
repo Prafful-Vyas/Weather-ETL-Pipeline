@@ -1,6 +1,6 @@
-import duckdb
 import logging
 import asyncio
+from pyspark.sql import SparkSession
 
 from metadata import initialize_metadata
 import ingestion
@@ -19,21 +19,38 @@ CITIES = {
 }
 
 
-async def run_ingestion():
+async def run_ingestion(spark):
     weather_data = await ingestion.fetch_multiple(CITIES)
-    bronze.save_raw(weather_data)
+    bronze.save_raw(spark, weather_data)
+
+
+def create_spark():
+    spark = (
+        SparkSession.builder
+        .appName("weather-pipeline")
+        .config("spark.sql.warehouse.dir", "spark-warehouse")
+        .enableHiveSupport()   # optional but useful for SQL tables
+        .getOrCreate()
+    )
+    return spark
 
 
 def main():
-    con = duckdb.connect("pipeline.duckdb")
+    spark = create_spark()
 
-    initialize_metadata(con)
+    # initialize metadata tables
+    initialize_metadata(spark)
 
-    asyncio.run(run_ingestion())
+    # ingestion layer
+    asyncio.run(run_ingestion(spark))
 
-    silver.run(con)
+    # transformations
+    silver.run(spark)
 
-    gold.run(con, full_refresh=True)
+    # final marts
+    gold.run(spark, full_refresh=True)
+
+    spark.stop()
 
 
 if __name__ == "__main__":

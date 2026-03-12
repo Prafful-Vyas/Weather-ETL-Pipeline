@@ -1,14 +1,15 @@
 # 🌦️ Weather ETL Pipeline
 
-A production-style Weather ETL pipeline built using:
+A **production-style Weather ETL pipeline** built using:
 
-* **DuckDB** (in-process analytical database)
+* **Apache Spark (PySpark + Spark SQL)**
 * **Hive-style partitioned Parquet**
-* Incremental processing with partition tracking
-* Modular architecture (`bronze.py`, `silver.py`, `gold.py`, `metadata.py`)
+* **Incremental partition-based processing**
+* **Medallion Architecture (Bronze → Silver → Gold)**
+* **Metadata-driven pipeline execution**
 * **uv** as the package manager
 
-This project demonstrates modern data engineering best practices using a lightweight local lakehouse architecture.
+This project demonstrates modern **data engineering best practices** using a lightweight **local lakehouse architecture powered by Spark**.
 
 ---
 
@@ -22,20 +23,40 @@ Raw Data  →  Bronze  →  Silver  →  Gold
 
 ### Layer Responsibilities
 
-* **Bronze** → Raw ingestion & partition detection
-* **Silver** → Data cleaning & validation
-* **Gold** → Aggregated analytics
+**Bronze**
 
-Each layer:
+* Raw ingestion
+* Partition detection
+* Writes raw API data to Parquet
 
-1. Detects available partitions
-2. Checks already processed partitions
-3. Computes the difference
-4. Processes only new partitions
-5. Writes partitioned Parquet output
-6. Updates `pipeline_metadata`
+**Silver**
 
-This ensures fast, incremental, idempotent execution.
+* Data cleaning
+* Schema normalization
+* Type casting
+* Data validation
+
+**Gold**
+
+* Aggregated analytics
+* City-level weather metrics
+
+---
+
+Each layer performs **incremental processing**:
+
+1. Detect available partitions
+2. Check previously processed partitions
+3. Compute the difference
+4. Process only new partitions
+5. Write partitioned output
+6. Update metadata
+
+This ensures:
+
+* **Idempotent execution**
+* **Efficient processing**
+* **Scalable data pipelines**
 
 ---
 
@@ -43,17 +64,22 @@ This ensures fast, incremental, idempotent execution.
 
 ```
 .
-├── data/                  # Bronze (raw weather parquet partitions)
+├── data/                  # Bronze layer (raw parquet partitions)
 │   └── city=<city>/date=<YYYY-MM-DD>/weather.parquet
-├── silver/                # Silver (cleaned parquet)
-├── gold/                  # Gold (aggregated parquet)
-├── bronze.py              # Bronze layer logic
-├── silver.py              # Silver layer logic
-├── gold.py                # Gold layer logic
+│
+├── silver/                # Silver layer (cleaned parquet)
+├── gold/                  # Gold layer (aggregated parquet)
+│
+├── ingestion.py           # Weather API ingestion
+├── bronze.py              # Bronze layer processing
+├── silver.py              # Silver layer transformations
+├── gold.py                # Gold layer aggregations
 ├── metadata.py            # Metadata table setup
 ├── main.py                # Pipeline orchestrator
+│
 ├── sql-data-cleaning.ipynb
-├── pyproject.toml         # Project config (uv)
+│
+├── pyproject.toml         # Project configuration
 └── uv.lock
 ```
 
@@ -61,65 +87,102 @@ This ensures fast, incremental, idempotent execution.
 
 # 🧱 Partitioning Strategy
 
-This project uses **Hive-style partitioning**:
+This project uses **Hive-style partitioning**.
+
+Example structure:
 
 ```
-city=London/date=2026-02-13/weather.parquet
+data/
+  city=London/
+      date=2026-02-13/
+          weather.parquet
 ```
 
 Benefits:
 
 * Automatic partition column inference
-* Partition pruning during queries
+* Partition pruning
 * Reduced I/O
-* Lakehouse-compatible structure
+* Efficient Spark queries
 * Scalable data layout
 
-DuckDB automatically reads `city` and `date` from folder paths when:
+Spark automatically reads partition columns from directory names.
 
-```sql
-read_parquet('silver/**/*.parquet', hive_partitioning = true)
+Example:
+
+```python
+spark.read.parquet("silver/**/*.parquet")
 ```
+
+Spark infers `city` and `date` from folder paths.
 
 ---
 
 # 📈 Incremental Processing
 
-The pipeline avoids full rebuilds.
+The pipeline **avoids full rebuilds**.
 
 Instead, it processes **only new partitions**.
 
-Metadata tracking is handled inside DuckDB:
+A metadata table tracks processed partitions.
 
 ```sql
 CREATE TABLE IF NOT EXISTS pipeline_metadata (
-    layer TEXT,
-    city TEXT,
+    layer STRING,
+    city STRING,
     date DATE,
-    processed_at TIMESTAMP,
-    PRIMARY KEY (layer, city, date)
-);
+    processed_at TIMESTAMP
+)
+USING PARQUET;
 ```
-
-### Workflow Example
-
-* New partition arrives in `data/`
-* Bronze processes it
-* Silver processes only new Bronze partitions
-* Gold processes only new Silver partitions
-* Metadata table updates automatically
-
-This makes the pipeline:
-
-* Idempotent
-* Efficient
-* Production-friendly
 
 ---
 
-# 📦 Package Management (uv)
+### Example Workflow
 
-This project uses **uv** instead of pip.
+1. New weather data arrives in `data/`
+2. Bronze detects new partitions
+3. Silver processes only new Bronze partitions
+4. Gold processes only new Silver partitions
+5. Metadata table is updated
+
+This makes the pipeline:
+
+* **Incremental**
+* **Idempotent**
+* **Efficient**
+
+---
+
+# ⚡ Spark Processing
+
+The pipeline uses **Apache Spark with Spark SQL** for distributed data processing.
+
+Spark handles:
+
+* Parquet scanning
+* Partition pruning
+* SQL transformations
+* Aggregations
+* Parallel execution
+
+Example transformation:
+
+```sql
+SELECT
+    city,
+    date,
+    AVG(temperature) AS avg_temp,
+    MAX(temperature) AS max_temp,
+    MIN(temperature) AS min_temp,
+    COUNT(*) AS record_count
+FROM silver
+GROUP BY city, date
+```
+
+---
+
+# 🚀 Running the Pipeline
 
 ### Install dependencies
 
@@ -127,12 +190,7 @@ This project uses **uv** instead of pip.
 uv sync
 ```
 
-Or create a new environment:
-
-```bash
-uv venv
-uv pip install duckdb pandas pyarrow
-```
+---
 
 ### Run the pipeline
 
@@ -140,7 +198,9 @@ uv pip install duckdb pandas pyarrow
 uv run python main.py
 ```
 
-### Open Jupyter Notebook
+---
+
+### Start Jupyter Notebook
 
 ```bash
 uv run jupyter notebook
@@ -148,110 +208,129 @@ uv run jupyter notebook
 
 ---
 
-# 🚀 Pipeline Orchestration
+# ⚙️ Pipeline Orchestration
 
-`main.py` coordinates execution:
+`main.py` coordinates pipeline execution.
 
 ```python
-import duckdb
+from pyspark.sql import SparkSession
 from metadata import initialize_metadata
-import bronze
 import silver
 import gold
 
 def main():
-    con = duckdb.connect("pipeline.duckdb")
-    initialize_metadata(con)
-    bronze.run(con)
-    silver.run(con)
-    gold.run(con)
+
+    spark = SparkSession.builder \
+        .appName("weather-etl") \
+        .getOrCreate()
+
+    initialize_metadata(spark)
+
+    silver.run(spark)
+    gold.run(spark)
+
+    spark.stop()
 
 if __name__ == "__main__":
     main()
 ```
 
-Each layer runs incrementally by default.
+Each layer runs **incrementally by default**.
 
 ---
 
 # 🥈 Silver Layer
 
-* Cleans null and invalid values
-* Normalizes column types
-* Standardizes schema
-* Writes partitioned Parquet
-* Updates metadata
+Responsibilities:
+
+* Remove invalid records
+* Normalize schema
+* Cast column types
+* Validate data
+* Write partitioned Parquet
+
+Output format:
+
+```
+silver/
+  city=<city>/
+      date=<date>/
+```
 
 ---
 
 # 🥇 Gold Layer
 
-Aggregates data at the `city + date` level.
+Aggregates weather data at **city + date** level.
 
 Example metrics:
 
 * Average temperature
-* Minimum temperature
 * Maximum temperature
-* Average humidity
-* Total record count
+* Minimum temperature
+* Record count
 
-Outputs partitioned Parquet and updates metadata.
+Outputs partitioned Parquet:
+
+```
+gold/
+  city=<city>/
+      date=<date>/
+```
 
 ---
 
-# 🧠 Querying with DuckDB
+# 🔎 Querying Gold Data with Spark
 
-Query Gold layer directly:
+Example query:
 
 ```python
-import duckdb
+df = spark.read.parquet("gold/**/*.parquet")
 
-con = duckdb.connect()
-
-df = con.execute("""
-    SELECT *
-    FROM read_parquet('gold/**/*.parquet', hive_partitioning=true)
-    WHERE city = 'London'
-      AND date = '2026-02-13';
-""").df()
-
-print(df)
+df.filter(
+    (df.city == "London") &
+    (df.date == "2026-02-13")
+).show()
 ```
 
-DuckDB automatically applies partition pruning for fast queries.
+Spark automatically performs **partition pruning**, reducing file scans.
 
 ---
 
 # 🧠 What This Project Demonstrates
 
-* Medallion architecture (Bronze → Silver → Gold)
-* Incremental ETL design
-* Metadata-driven processing
+This project showcases core **Data Engineering concepts**:
+
+* Apache Spark data processing
+* Medallion architecture
+* Incremental ETL pipelines
+* Metadata-driven orchestration
 * Hive-style partitioning
-* SQL-based data transformations
-* Modular pipeline structure
-* DuckDB analytics on Parquet
-* Lakehouse-style local data platform
+* SQL-based transformations
+* Modular pipeline design
+* Lakehouse-style data layout
 
 ---
 
 # 🔮 Future Improvements
 
-* CLI flags (`--full-refresh`)
-* Parallel partition processing
-* Logging module
-* Docker containerization
-* Cloud storage support (S3 / GCS / Azure)
-* Automated testing (pytest)
-* CI/CD pipeline
-* Data quality validation layer
+Potential enhancements:
+
+* **Delta Lake** support
+* **Kafka ingestion**
+* **Airflow orchestration**
+* **Parallel partition processing**
+* **Data quality checks**
+* **Structured logging**
+* **Docker containerization**
+* **Cloud storage support (S3 / GCS / Azure)**
+* **CI/CD pipeline**
+* **Automated testing (pytest)**
 
 ---
 
 # 📌 Summary
 
-This project implements a scalable, partition-aware, incremental ETL pipeline using DuckDB and Parquet.
+This project implements a **scalable, partition-aware, incremental ETL pipeline using Apache Spark and Parquet**.
 
-It mirrors real-world data engineering workflows and serves as a strong foundation for production-ready analytics pipelines.
-
+It mirrors real-world **data engineering workflows** and serves as a strong foundation for **production-grade analytics pipelines**.

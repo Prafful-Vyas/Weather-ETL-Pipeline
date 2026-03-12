@@ -1,5 +1,5 @@
-import duckdb
 import logging
+from pyspark.sql import functions as F
 
 logger = logging.getLogger(__name__)
 
@@ -10,50 +10,49 @@ SILVER_SOURCE_PATH = "silver/**/*.parquet"
 # Partition Detection
 # ---------------------------------------------------------------------
 
-def get_silver_partitions(con: duckdb.DuckDBPyConnection) -> set:
+def get_silver_partitions(spark) -> set:
     """
     Detect available Silver partitions using hive partitioning.
     Handles missing silver folder safely.
     """
     try:
-        partitions = con.execute(f"""
-            SELECT DISTINCT city, date
-            FROM read_parquet('{SILVER_SOURCE_PATH}', hive_partitioning=true)
-        """).fetchall()
+        df = (
+            spark.read
+            .option("basePath", "silver")
+            .parquet(SILVER_SOURCE_PATH)
+            .select("city", "date")
+            .distinct()
+        )
 
-        return set(partitions)
+        return {(r.city, r.date) for r in df.collect()}
 
-    except duckdb.IOException:
+    except Exception:
         logger.warning("No Silver data found.")
         return set()
 
 
-def get_processed_partitions(con: duckdb.DuckDBPyConnection) -> set:
-    processed = con.execute("""
+def get_processed_partitions(spark) -> set:
+    df = spark.sql("""
         SELECT city, date
         FROM pipeline_metadata
         WHERE layer = 'gold'
-    """).fetchall()
+    """)
 
-    return set(processed)
+    return {(r.city, r.date) for r in df.collect()}
 
 
 # ---------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------
 
-def validate_partition(con: duckdb.DuckDBPyConnection):
-    row_count = con.execute(
-        "SELECT COUNT(*) FROM tmp_gold"
-    ).fetchone()[0]
+def validate_partition(df):
+
+    row_count = df.count()
 
     if row_count == 0:
         raise ValueError("Empty Gold partition detected.")
 
-    null_check = con.execute("""
-        SELECT COUNT(*) FROM tmp_gold
-        WHERE avg_temp IS NULL
-    """).fetchone()[0]
+    null_check = df.filter(F.col("avg_temp").isNull()).count()
 
     if null_check > 0:
         raise ValueError("Gold aggregation produced NULL averages.")
@@ -63,36 +62,40 @@ def validate_partition(con: duckdb.DuckDBPyConnection):
 # Processing Logic
 # ---------------------------------------------------------------------
 
-def process_partition(con: duckdb.DuckDBPyConnection, city: str, date):
+def process_partition(spark, city: str, date):
+
     logger.info(f"Processing Gold partition: {city} - {date}")
 
-    con.execute(f"""
-        CREATE OR REPLACE TABLE tmp_gold AS
-        SELECT
-            city,
-            CAST(date AS DATE) AS date,
-            AVG(temperature) AS avg_temp,
-            MAX(temperature) AS max_temp,
-            MIN(temperature) AS min_temp,
-            COUNT(*) AS record_count
-        FROM read_parquet('{SILVER_SOURCE_PATH}', hive_partitioning=true)
-        WHERE city = '{city}'
-          AND date = '{date}'
-        GROUP BY city, date
+    silver_df = (
+        spark.read
+        .option("basePath", "silver")
+        .parquet(SILVER_SOURCE_PATH)
+        .filter((F.col("city") == city) & (F.col("date") == date))
+    )
+
+    tmp_gold = (
+        silver_df.groupBy("city", "date")
+        .agg(
+            F.avg("temperature").alias("avg_temp"),
+            F.max("temperature").alias("max_temp"),
+            F.min("temperature").alias("min_temp"),
+            F.count("*").alias("record_count")
+        )
+    )
+
+    validate_partition(tmp_gold)
+
+    (
+        tmp_gold.write
+        .mode("overwrite")
+        .partitionBy("city", "date")
+        .parquet("gold")
+    )
+
+    spark.sql(f"""
+        INSERT INTO pipeline_metadata
+        VALUES ('gold', '{city}', '{date}', CURRENT_TIMESTAMP)
     """)
-
-    validate_partition(con)
-
-    con.execute(f"""
-        COPY tmp_gold
-        TO 'gold'
-        (FORMAT PARQUET, PARTITION_BY (city, date), OVERWRITE TRUE);
-    """)
-
-    con.execute("""
-        INSERT OR REPLACE INTO pipeline_metadata
-        VALUES ('gold', ?, ?, CURRENT_TIMESTAMP)
-    """, [city, date])
 
     logger.info(f"Finished Gold partition: {city} - {date}")
 
@@ -101,10 +104,11 @@ def process_partition(con: duckdb.DuckDBPyConnection, city: str, date):
 # Public Runner
 # ---------------------------------------------------------------------
 
-def run(con: duckdb.DuckDBPyConnection, full_refresh: bool = False):
+def run(spark, full_refresh: bool = False):
+
     logger.info("Starting Gold layer processing")
 
-    available = get_silver_partitions(con)
+    available = get_silver_partitions(spark)
 
     if not available:
         logger.info("No Silver partitions available. Skipping Gold.")
@@ -114,12 +118,12 @@ def run(con: duckdb.DuckDBPyConnection, full_refresh: bool = False):
         logger.info("Full refresh mode enabled")
         to_process = available
     else:
-        processed = get_processed_partitions(con)
+        processed = get_processed_partitions(spark)
         to_process = available - processed
 
     logger.info(f"{len(to_process)} Gold partitions to process")
 
     for city, date in to_process:
-        process_partition(con, city, date)
+        process_partition(spark, city, date)
 
     logger.info("Gold layer completed")
